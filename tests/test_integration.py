@@ -6,11 +6,15 @@ without requiring a running MCP server or NotebookLM auth.
 
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 from metascaffold.classifier import Classifier
+from metascaffold.distiller import Distiller
 from metascaffold.evaluator import Evaluator
+from metascaffold.pipeline import CognitivePipeline, PipelineState
 from metascaffold.planner import Planner
-from metascaffold.sandbox import Sandbox
+from metascaffold.reflector import Reflector
+from metascaffold.sandbox import Sandbox, SandboxResult
 from metascaffold.telemetry import CognitiveEvent, TelemetryLogger
 
 
@@ -107,3 +111,139 @@ class TestCognitiveLoop:
         )
         assert classification.routing == "system1"
         # System 1: no planning needed, proceed directly
+
+
+class TestLLMPipelineIntegration:
+    """Integration test for the full LLM cognitive pipeline."""
+
+    async def test_system2_full_pipeline_with_mocked_llm(self):
+        """System 2 task should flow through all 6 stages with mocked LLM."""
+        mock_llm = AsyncMock()
+        mock_llm.enabled = True
+
+        # Stage 1: Classify -> system2
+        classify_resp = MagicMock(
+            content=json.dumps({"routing": "system2", "confidence": 0.3, "reasoning": "Complex refactor"}),
+            error="", model="gpt-5.3-codex", total_tokens=50
+        )
+        # Stage 2: Distill -> template
+        distill_resp = MagicMock(
+            content=json.dumps({"objective": "Refactor auth module", "constraints": ["Keep backward compat"], "target_files": ["src/auth.py"], "variables": {}}),
+            error=""
+        )
+        # Stage 3: Plan -> strategies
+        plan_resp = MagicMock(
+            content=json.dumps({"strategies": [{"id": "A", "description": "TDD refactor", "steps": ["Write test", "Refactor", "Verify"], "confidence": 0.8, "risks": ["Partial migration"], "rollback_plan": "git revert"}], "recommended": "A"}),
+            error=""
+        )
+        # Stage 5: Evaluate -> pass
+        eval_resp = MagicMock(
+            content=json.dumps({"verdict": "pass", "confidence": 0.9, "feedback": {"failing_tests": [], "error_lines": [], "root_cause": "", "suggested_fix": ""}, "adversarial_findings": [], "revision_allowed": True}),
+            error=""
+        )
+
+        mock_llm.complete = AsyncMock(side_effect=[classify_resp, distill_resp, plan_resp, eval_resp])
+
+        # Build pipeline with all LLM-powered components
+        pipeline = CognitivePipeline(
+            classifier=Classifier(llm_client=mock_llm),
+            distiller=Distiller(llm_client=mock_llm),
+            planner=Planner(llm_client=mock_llm),
+            evaluator=Evaluator(llm_client=mock_llm),
+        )
+
+        # Stage 1: Classify
+        state = PipelineState(task="Refactor auth module", context="src/auth.py needs cleanup")
+        state = await pipeline.classify_stage(state)
+        assert state.classification.routing == "system2"
+        assert state.should_bypass is False
+
+        # Stage 2: Distill
+        state = await pipeline.distill_stage(state)
+        assert state.template is not None
+        assert state.template.objective == "Refactor auth module"
+
+        # Stage 3: Plan
+        state = await pipeline.plan_stage(state)
+        assert state.plan is not None
+        assert len(state.plan.strategies) >= 1
+
+        # Stage 4: Execute (simulated)
+        sandbox_result = SandboxResult(exit_code=0, stdout="All 12 tests passed", stderr="", duration_ms=200)
+
+        # Stage 5: Evaluate
+        state = await pipeline.evaluate_stage(state, sandbox_result)
+        assert state.evaluation is not None
+        assert state.evaluation.verdict == "pass"
+
+        # Verify LLM was called 4 times (classify, distill, plan, evaluate)
+        assert mock_llm.complete.await_count == 4
+
+    async def test_system1_bypasses_llm_stages(self):
+        """System 1 tasks should skip distill and plan even with LLM available."""
+        mock_llm = AsyncMock()
+        mock_llm.enabled = True
+
+        # Only need classify response (system1 skips distill/plan)
+        classify_resp = MagicMock(
+            content=json.dumps({"routing": "system1", "confidence": 0.95, "reasoning": "Read-only tool"}),
+            error="", model="gpt-5.3-codex", total_tokens=30
+        )
+        mock_llm.complete = AsyncMock(return_value=classify_resp)
+
+        pipeline = CognitivePipeline(
+            classifier=Classifier(llm_client=mock_llm),
+            distiller=Distiller(llm_client=mock_llm),
+            planner=Planner(llm_client=mock_llm),
+        )
+
+        state = PipelineState(task="Read README", context="Simple read")
+        state = await pipeline.classify_stage(state)
+        assert state.classification.routing == "system1"
+        assert state.should_bypass is True
+
+        # Distill and Plan should be skipped
+        state = await pipeline.distill_stage(state)
+        assert state.template is None
+
+        state = await pipeline.plan_stage(state)
+        assert state.plan is None
+
+        # LLM was only called once (classify)
+        assert mock_llm.complete.await_count == 1
+
+    async def test_pipeline_with_retry_loop(self):
+        """Pipeline should handle retry -> pass flow."""
+        mock_llm = AsyncMock()
+        mock_llm.enabled = True
+
+        # First evaluate -> retry, second evaluate -> pass
+        eval_retry = MagicMock(
+            content=json.dumps({"verdict": "retry", "confidence": 0.4, "feedback": {"failing_tests": ["test_login"], "error_lines": [], "root_cause": "Missing null check", "suggested_fix": "Add null check"}, "adversarial_findings": [], "revision_allowed": True}),
+            error=""
+        )
+        eval_pass = MagicMock(
+            content=json.dumps({"verdict": "pass", "confidence": 0.9, "feedback": {}, "adversarial_findings": [], "revision_allowed": True}),
+            error=""
+        )
+        mock_llm.complete = AsyncMock(side_effect=[eval_retry, eval_pass])
+
+        pipeline = CognitivePipeline(
+            evaluator=Evaluator(llm_client=mock_llm),
+        )
+
+        # First attempt -> retry
+        state = PipelineState(task="Fix login", context="", attempt=1)
+        sandbox_fail = SandboxResult(exit_code=1, stdout="", stderr="AssertionError: test_login", duration_ms=100)
+        state = await pipeline.evaluate_stage(state, sandbox_fail)
+        assert state.evaluation.verdict == "retry"
+        assert state.evaluation.revision_allowed is True
+
+        # Retry
+        state = state.with_retry()
+        assert state.attempt == 2
+
+        # Second attempt -> pass
+        sandbox_pass = SandboxResult(exit_code=0, stdout="All tests passed", stderr="", duration_ms=100)
+        state = await pipeline.evaluate_stage(state, sandbox_pass)
+        assert state.evaluation.verdict == "pass"
