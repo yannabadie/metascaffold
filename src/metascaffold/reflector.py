@@ -9,6 +9,9 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
+
+from metascaffold.reflection_memory import ReflectionMemory
 
 logger = logging.getLogger("metascaffold.reflector")
 
@@ -55,8 +58,14 @@ class ReflectionResult:
 class Reflector:
     """Analyzes telemetry to extract reusable rules and procedures."""
 
-    def __init__(self, llm_client: object | None = None):
+    def __init__(
+        self,
+        llm_client: object | None = None,
+        memory_path: Path | None = None,
+    ):
         self._llm = llm_client
+        self.memory = ReflectionMemory(storage_path=memory_path)
+        self.memory.load()
 
     async def reflect(self, events: list[dict]) -> ReflectionResult:
         """Analyze a batch of telemetry events and extract patterns."""
@@ -66,6 +75,12 @@ class Reflector:
         if self._llm and getattr(self._llm, "enabled", False):
             result = await self._llm_reflect(events)
             if result is not None:
+                # Store/reinforce rules in memory
+                for rule_text in result.rules:
+                    if not self.memory.reinforce(rule_text):
+                        self.memory.add_rule(rule_text)
+                self.memory.prune()
+                self.memory.save()
                 return result
 
         # Fallback: no reflection without LLM

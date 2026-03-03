@@ -1,6 +1,8 @@
 """Tests for the MARS Reflector component."""
 
 import json
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -92,3 +94,53 @@ class TestReflector:
         result = await reflector.reflect(events)
         assert result.rules == []
         assert result.source_event_count == 1
+
+
+class TestReflectorWithMemory:
+    """Tests for reflector integration with Ebbinghaus reflection memory."""
+
+    async def test_reflect_stores_rules_in_memory(self):
+        """After LLM reflection, rules should be persisted in memory."""
+        mock_client = AsyncMock()
+        mock_client.enabled = True
+        mock_client.complete = AsyncMock(return_value=MagicMock(
+            content=json.dumps({
+                "rules": ["Always run tests after modifying shared code"],
+                "procedures": ["Use TDD"],
+            }),
+            error="",
+        ))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            memory_path = Path(tmpdir) / "reflection_memory.json"
+            reflector = Reflector(llm_client=mock_client, memory_path=memory_path)
+            result = await reflector.reflect([{"event": "test"}])
+
+            assert len(result.rules) == 1
+            assert reflector.memory.rules[0].content == "Always run tests after modifying shared code"
+
+    async def test_reflect_reinforces_existing_rules(self):
+        """When the same rule appears again, it should be reinforced, not duplicated."""
+        mock_client = AsyncMock()
+        mock_client.enabled = True
+        mock_client.complete = AsyncMock(return_value=MagicMock(
+            content=json.dumps({
+                "rules": ["Use TDD"],
+                "procedures": [],
+            }),
+            error="",
+        ))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            memory_path = Path(tmpdir) / "reflection_memory.json"
+            reflector = Reflector(llm_client=mock_client, memory_path=memory_path)
+
+            # First reflection — adds rule
+            await reflector.reflect([{"event": "first"}])
+            assert len(reflector.memory.rules) == 1
+            assert reflector.memory.rules[0].reinforcement_count == 0
+
+            # Second reflection — same rule should be reinforced, not duplicated
+            await reflector.reflect([{"event": "second"}])
+            assert len(reflector.memory.rules) == 1  # NOT 2
+            assert reflector.memory.rules[0].reinforcement_count == 1
