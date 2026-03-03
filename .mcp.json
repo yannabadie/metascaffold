@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "metascaffold": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "--directory",
+        ".",
+        "run",
+        "python",
+        "src/metascaffold/server.py"
+      ],
+      "env": {}
+    }
+  }
+}
