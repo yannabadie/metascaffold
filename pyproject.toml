@@ -6,7 +6,8 @@ requires-python = ">=3.11"
 dependencies = [
     "mcp[cli]>=1.2.0",
     "pydantic>=2.0",
-    "notebooklm-py>=0.3.0",
+    "notebooklm-py[browser]>=0.3.0",
+    "truststore>=0.10.4",
 ]
 
 [project.optional-dependencies]

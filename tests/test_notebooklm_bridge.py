@@ -28,11 +28,13 @@ class TestNotebookLMBridge:
     @patch("metascaffold.notebooklm_bridge._get_client")
     def test_query_returns_content_on_success(self, mock_get_client):
         """Successful query should return content from NotebookLM."""
-        mock_client = MagicMock()
-        mock_client.list_notebooks.return_value = [
-            MagicMock(title="Test", id="test-id"),
-        ]
-        mock_client.chat.return_value = MagicMock(text="Metacognition is thinking about thinking.")
+        # Build async mock client
+        mock_nb = MagicMock(title="Test", id="test-id")
+        mock_client = AsyncMock()
+        mock_client.notebooks.list.return_value = [mock_nb]
+        mock_client.chat.ask.return_value = MagicMock(text="Metacognition is thinking about thinking.")
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_get_client.return_value = mock_client
 
         bridge = NotebookLMBridge(enabled=True, default_notebook="Test")
