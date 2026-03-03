@@ -1,7 +1,7 @@
 [project]
 name = "metascaffold"
-version = "0.1.0"
-description = "Metacognition plugin for Claude Code — dual-process System 1/2 architecture"
+version = "0.2.0"
+description = "Metacognition plugin for Claude Code — LLM-powered dual-process cognitive pipeline"
 requires-python = ">=3.11"
 dependencies = [
     "mcp[cli]>=1.2.0",
