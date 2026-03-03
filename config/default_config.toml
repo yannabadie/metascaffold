@@ -1,0 +1,25 @@
+# config/default_config.toml
+
+[classifier]
+system2_threshold = 0.8
+always_system2_tools = ["Write"]
+
+[sandbox]
+default_timeout_seconds = 30
+default_memory_limit_mb = 512
+network_access = false
+max_retry_attempts = 3
+
+[telemetry]
+json_dir = "~/.metascaffold/telemetry/"
+sqlite_path = "~/.metascaffold/cognitive.db"
+log_level = "info"
+
+[notebooklm]
+enabled = true
+default_notebook = "MetaScaffold_Core"
+fallback_on_error = true
+
+[mcp_server]
+host = "127.0.0.1"
+port = 8787
