@@ -3,6 +3,8 @@
 [classifier]
 system2_threshold = 0.8
 always_system2_tools = ["Write"]
+entropy_threshold = 0.5
+medium_entropy_threshold = 0.3
 
 [sandbox]
 default_timeout_seconds = 30
@@ -32,3 +34,17 @@ evaluator_model = "o3-mini"
 planner_model = "gpt-4.1-mini"
 distiller_model = "gpt-4.1-nano"
 reflector_model = "o3-mini"
+
+[verifier]
+run_ast = true
+run_ruff = true
+run_mypy = false
+run_pytest = false
+ruff_timeout = 15
+mypy_timeout = 30
+pytest_timeout = 60
+
+[memory]
+prune_threshold = 0.1
+stability_hours = 168.0
+storage_path = "~/.metascaffold/reflection_memory.json"

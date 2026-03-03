@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 from metascaffold.config import MetaScaffoldConfig, load_config
+from metascaffold.config import ClassifierConfig, VerifierConfig, MemoryConfig
 
 
 class TestMetaScaffoldConfig:
@@ -49,3 +50,25 @@ class TestMetaScaffoldConfig:
         assert cfg.llm.reflector_model == "o3-mini"
         assert cfg.llm.enabled is True
         assert cfg.llm.fallback_to_heuristics is True
+
+
+class TestV03Config:
+    def test_entropy_config_has_defaults(self):
+        """ClassifierConfig should have entropy thresholds with correct defaults."""
+        cfg = ClassifierConfig()
+        assert cfg.entropy_threshold == 0.5
+        assert cfg.medium_entropy_threshold == 0.3
+
+    def test_verifier_config_has_defaults(self):
+        """VerifierConfig should have correct boolean and timeout defaults."""
+        cfg = VerifierConfig()
+        assert cfg.run_ast is True
+        assert cfg.run_ruff is True
+        assert cfg.run_mypy is False
+        assert cfg.run_pytest is False
+
+    def test_memory_config_has_defaults(self):
+        """MemoryConfig should have correct numeric defaults."""
+        cfg = MemoryConfig()
+        assert cfg.prune_threshold == 0.1
+        assert cfg.stability_hours == 168.0

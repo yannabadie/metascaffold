@@ -19,6 +19,8 @@ _USER_CONFIG = Path.home() / ".metascaffold" / "config.toml"
 class ClassifierConfig:
     system2_threshold: float = 0.8
     always_system2_tools: list[str] = field(default_factory=lambda: ["Write"])
+    entropy_threshold: float = 0.5
+    medium_entropy_threshold: float = 0.3
 
 
 @dataclass
@@ -50,6 +52,24 @@ class McpServerConfig:
 
 
 @dataclass
+class VerifierConfig:
+    run_ast: bool = True
+    run_ruff: bool = True
+    run_mypy: bool = False
+    run_pytest: bool = False
+    ruff_timeout: int = 15
+    mypy_timeout: int = 30
+    pytest_timeout: int = 60
+
+
+@dataclass
+class MemoryConfig:
+    prune_threshold: float = 0.1
+    stability_hours: float = 168.0
+    storage_path: str = ""
+
+
+@dataclass
 class LLMConfig:
     enabled: bool = True
     fallback_to_heuristics: bool = True
@@ -68,6 +88,8 @@ class MetaScaffoldConfig:
     notebooklm: NotebookLMConfig = field(default_factory=NotebookLMConfig)
     mcp_server: McpServerConfig = field(default_factory=McpServerConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    verifier: VerifierConfig = field(default_factory=VerifierConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
 
 def _expand_path(p: str) -> str:
@@ -117,6 +139,21 @@ def _dict_to_config(data: dict) -> MetaScaffoldConfig:
 
     if "llm" in data:
         cfg.llm = LLMConfig(**data["llm"])
+
+    if "verifier" in data:
+        cfg.verifier = VerifierConfig(**data["verifier"])
+
+    if "memory" in data:
+        m = data["memory"]
+        cfg.memory = MemoryConfig(
+            prune_threshold=m.get("prune_threshold", 0.1),
+            stability_hours=m.get("stability_hours", 168.0),
+            storage_path=_expand_path(m.get("storage_path", "~/.metascaffold/reflection_memory.json")),
+        )
+    else:
+        cfg.memory = MemoryConfig(
+            storage_path=_expand_path("~/.metascaffold/reflection_memory.json"),
+        )
 
     return cfg
 
