@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import logging
 import sys
+from pathlib import Path
 from typing import Annotated
 
 from pydantic import Field
@@ -49,6 +50,8 @@ classifier = Classifier(
     system2_threshold=config.classifier.system2_threshold,
     always_system2_tools=config.classifier.always_system2_tools,
     llm_client=_llm,
+    entropy_threshold=config.classifier.entropy_threshold,
+    medium_entropy_threshold=config.classifier.medium_entropy_threshold,
 )
 planner = Planner(llm_client=_llm)
 sandbox = Sandbox(default_timeout_seconds=config.sandbox.default_timeout_seconds)
@@ -65,7 +68,10 @@ nlm_bridge = NotebookLMBridge(
 
 # New v0.2 components
 distiller = Distiller(llm_client=_llm)
-reflector = Reflector(llm_client=_llm)
+reflector = Reflector(
+    llm_client=_llm,
+    memory_path=Path(config.memory.storage_path) if config.memory.storage_path else None,
+)
 
 # Pipeline orchestrator
 pipeline = CognitivePipeline(
@@ -301,11 +307,14 @@ _RELOAD_ORDER = [
     "metascaffold.telemetry",
     "metascaffold.notebooklm_bridge",
     "metascaffold.llm_client",
+    "metascaffold.entropy",
     "metascaffold.classifier",
     "metascaffold.planner",
     "metascaffold.sandbox",
+    "metascaffold.verifiers",
     "metascaffold.evaluator",
     "metascaffold.distiller",
+    "metascaffold.reflection_memory",
     "metascaffold.reflector",
     "metascaffold.pipeline",
 ]
@@ -353,6 +362,8 @@ def _reload_components() -> list[str]:
         system2_threshold=config.classifier.system2_threshold,
         always_system2_tools=config.classifier.always_system2_tools,
         llm_client=_llm,
+        entropy_threshold=config.classifier.entropy_threshold,
+        medium_entropy_threshold=config.classifier.medium_entropy_threshold,
     )
     planner = _Planner(llm_client=_llm)
     sandbox = _Sandbox(default_timeout_seconds=config.sandbox.default_timeout_seconds)
@@ -367,7 +378,10 @@ def _reload_components() -> list[str]:
         fallback_on_error=config.notebooklm.fallback_on_error,
     )
     distiller = _Distiller(llm_client=_llm)
-    reflector = _Reflector(llm_client=_llm)
+    reflector = _Reflector(
+        llm_client=_llm,
+        memory_path=Path(config.memory.storage_path) if config.memory.storage_path else None,
+    )
     pipeline = _CognitivePipeline(
         classifier=classifier,
         distiller=distiller,
