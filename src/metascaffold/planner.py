@@ -1,13 +1,18 @@
 """Planner — decomposes System 2 tasks into strategies with steps, risks, and rollback plans.
 
 The Planner produces structured plans that the Evaluator can later assess.
-It uses heuristic decomposition (not LLM calls) to suggest strategies.
+It uses heuristic decomposition by default and can optionally delegate to an
+LLM for context-aware strategy generation.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -53,8 +58,43 @@ _BUG_PATTERN = re.compile(r"fix|bug|error|issue|broken|crash", re.IGNORECASE)
 _FEATURE_PATTERN = re.compile(r"add|create|implement|build|new", re.IGNORECASE)
 
 
+_PLANNER_SYSTEM_PROMPT = """\
+You are a software engineering planner. Given a task and its context, generate \
+1 to 3 execution strategies. Return ONLY valid JSON with no extra text.
+
+The JSON schema is:
+{
+  "strategies": [
+    {
+      "id": "A",
+      "description": "Short description of the strategy",
+      "steps": ["Step 1", "Step 2", "..."],
+      "confidence": 0.85,
+      "risks": ["Risk 1", "Risk 2"],
+      "rollback_plan": "How to undo this strategy"
+    }
+  ],
+  "recommended": "A"
+}
+
+Rules:
+- Generate between 1 and 3 strategies, labelled A, B, C.
+- Each strategy must have at least 2 steps, a confidence between 0 and 1, \
+at least 1 risk, and a rollback plan.
+- The "recommended" field must be the id of the best strategy.
+- Tailor strategies to the specific task and context provided.
+- Return ONLY the JSON object, no markdown fences or commentary.
+"""
+
+
 class Planner:
-    """Heuristic planner that decomposes tasks into strategies."""
+    """Planner that decomposes tasks into strategies.
+
+    Supports both synchronous heuristic planning and async LLM-powered planning.
+    """
+
+    def __init__(self, llm_client: object | None = None) -> None:
+        self._llm_client = llm_client
 
     def create_plan(
         self,
@@ -182,3 +222,79 @@ class Planner:
                 rollback_plan="Revert all changes via git",
             ),
         ]
+
+    # ------------------------------------------------------------------
+    # Async LLM-powered planning
+    # ------------------------------------------------------------------
+
+    async def create_plan_async(
+        self,
+        task: str,
+        context: str,
+        notebooklm_insights: str = "",
+    ) -> Plan:
+        """Create a plan using LLM if available, falling back to heuristics."""
+        if self._llm_client and getattr(self._llm_client, "enabled", False):
+            plan = await self._llm_plan(task, context, notebooklm_insights)
+            if plan is not None:
+                return plan
+            logger.warning("LLM planning failed; falling back to heuristics")
+
+        return self.create_plan(task, context, notebooklm_insights)
+
+    async def _llm_plan(
+        self,
+        task: str,
+        context: str,
+        notebooklm_insights: str,
+    ) -> Plan | None:
+        """Call the LLM to generate a context-aware plan.
+
+        Returns *None* on any failure so the caller can fall back gracefully.
+        """
+        user_prompt_parts = [f"Task: {task}", f"Context: {context}"]
+        if notebooklm_insights:
+            user_prompt_parts.append(f"Domain insights: {notebooklm_insights}")
+        user_prompt = "\n".join(user_prompt_parts)
+
+        try:
+            response = await self._llm_client.complete(
+                model="",  # let the client pick the default model
+                system_prompt=_PLANNER_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                temperature=0.2,
+                max_tokens=2048,
+                response_format={"type": "json_object"},
+            )
+
+            if response.error:
+                logger.error("LLM returned error: %s", response.error)
+                return None
+
+            data = json.loads(response.content)
+            strategies = [
+                Strategy(
+                    id=s["id"],
+                    description=s["description"],
+                    steps=s["steps"],
+                    confidence=float(s["confidence"]),
+                    risks=s["risks"],
+                    rollback_plan=s["rollback_plan"],
+                )
+                for s in data["strategies"]
+            ]
+            recommended = data.get("recommended", strategies[0].id if strategies else "A")
+
+            return Plan(
+                task=task,
+                strategies=strategies,
+                recommended=recommended,
+                notebooklm_insights=notebooklm_insights,
+            )
+
+        except (json.JSONDecodeError, KeyError, TypeError, IndexError) as exc:
+            logger.error("Failed to parse LLM plan response: %s", exc)
+            return None
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Unexpected error during LLM planning: %s", exc)
+            return None
