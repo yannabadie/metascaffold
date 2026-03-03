@@ -25,10 +25,29 @@ class PipelineState:
     reflection: object | None = None
     attempt: int = 1
     max_attempts: int = 3
+    compute_level: float | None = None
 
     @property
     def should_bypass(self) -> bool:
-        """True if classification says System 1 (skip Distill+Plan)."""
+        """True if both distill and plan should be bypassed (legacy compat)."""
+        return self.should_bypass_distill and self.should_bypass_plan
+
+    @property
+    def should_bypass_distill(self) -> bool:
+        """True if compute_level is 1 (System 1 — skip distill+plan)."""
+        if self.compute_level is not None:
+            return self.compute_level <= 1
+        # Legacy fallback: no compute_level → use routing
+        if self.classification is None:
+            return False
+        return getattr(self.classification, "routing", "") == "system1"
+
+    @property
+    def should_bypass_plan(self) -> bool:
+        """True if compute_level < 2 (System 1 or 1.5 — skip plan)."""
+        if self.compute_level is not None:
+            return self.compute_level < 2
+        # Legacy fallback
         if self.classification is None:
             return False
         return getattr(self.classification, "routing", "") == "system1"
@@ -61,6 +80,7 @@ class PipelineState:
             "task": self.task,
             "context": self.context[:200],
             "attempt": self.attempt,
+            "compute_level": self.compute_level,
             "classification": _safe_dict(self.classification),
             "template": _safe_dict(self.template),
             "plan": _safe_dict(self.plan),
@@ -87,7 +107,7 @@ class CognitivePipeline:
         self.reflector = reflector
 
     async def classify_stage(self, state: PipelineState) -> PipelineState:
-        """Stage 1: Classify the task as System 1 or System 2."""
+        """Stage 1: Classify the task as System 1, 1.5, or 2."""
         if self.classifier is None:
             return state
         result = await self.classifier.classify_async(
@@ -95,18 +115,21 @@ class CognitivePipeline:
             tool_input={},
             context=state.task + " " + state.context,
         )
-        return replace(state, classification=result)
+        compute_level = None
+        if hasattr(result, "signals") and isinstance(result.signals, dict):
+            compute_level = result.signals.get("compute_level")
+        return replace(state, classification=result, compute_level=compute_level)
 
     async def distill_stage(self, state: PipelineState) -> PipelineState:
         """Stage 2: Distill the task into a structured template."""
-        if state.should_bypass or self.distiller is None:
+        if state.should_bypass_distill or self.distiller is None:
             return state
         template = await self.distiller.distill(state.task, state.context)
         return replace(state, template=template)
 
     async def plan_stage(self, state: PipelineState) -> PipelineState:
         """Stage 3: Generate execution strategies."""
-        if state.should_bypass or self.planner is None:
+        if state.should_bypass_plan or self.planner is None:
             return state
         task_text = state.task
         if state.template and hasattr(state.template, "objective"):

@@ -161,3 +161,71 @@ class TestCognitivePipeline:
         state = PipelineState(task="test", context="")
         result = await pipeline.classify_stage(state)
         assert result.classification is None
+
+
+class TestAdaptiveCompute:
+    """Tests for System 1 / 1.5 / 2 adaptive compute routing."""
+
+    def test_compute_level_defaults_to_none(self):
+        """New PipelineState should have compute_level=None."""
+        state = PipelineState(task="test", context="")
+        assert state.compute_level is None
+
+    def test_system1_bypasses_distill_and_plan(self):
+        """compute_level=1 should bypass both distill and plan."""
+        state = PipelineState(task="test", context="", compute_level=1)
+        assert state.should_bypass_distill is True
+        assert state.should_bypass_plan is True
+        assert state.should_bypass is True
+
+    def test_system15_runs_distill_skips_plan(self):
+        """compute_level=1.5 should run distill but skip plan."""
+        state = PipelineState(task="test", context="", compute_level=1.5)
+        assert state.should_bypass_distill is False
+        assert state.should_bypass_plan is True
+        assert state.should_bypass is False
+
+    def test_system2_runs_all(self):
+        """compute_level=2 should run both distill and plan."""
+        state = PipelineState(task="test", context="", compute_level=2)
+        assert state.should_bypass_distill is False
+        assert state.should_bypass_plan is False
+        assert state.should_bypass is False
+
+    async def test_classify_stage_sets_compute_level(self):
+        """classify_stage should extract compute_level from classifier signals."""
+        mock_classifier = AsyncMock()
+        mock_classifier.classify_async = AsyncMock(return_value=MagicMock(
+            routing="system2",
+            signals={"compute_level": 1.5},
+        ))
+
+        pipeline = CognitivePipeline(classifier=mock_classifier)
+        state = await pipeline.classify_stage(
+            PipelineState(task="Medium task", context="some context")
+        )
+        assert state.compute_level == 1.5
+
+    async def test_distill_skipped_for_system1(self):
+        """Distill should not be called when compute_level=1."""
+        mock_distiller = AsyncMock()
+        mock_distiller.distill = AsyncMock()
+
+        state = PipelineState(task="test", context="", compute_level=1)
+        pipeline = CognitivePipeline(distiller=mock_distiller)
+        result = await pipeline.distill_stage(state)
+        assert result.template is None
+        mock_distiller.distill.assert_not_awaited()
+
+    async def test_distill_runs_for_system15(self):
+        """Distill should run when compute_level=1.5."""
+        mock_template = MagicMock(objective="Distilled task")
+        mock_distiller = AsyncMock()
+        mock_distiller.distill = AsyncMock(return_value=mock_template)
+
+        state = PipelineState(task="test", context="", compute_level=1.5)
+        pipeline = CognitivePipeline(distiller=mock_distiller)
+        result = await pipeline.distill_stage(state)
+        assert result.template is not None
+        assert result.template.objective == "Distilled task"
+        mock_distiller.distill.assert_awaited_once()
