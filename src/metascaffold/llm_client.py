@@ -1,21 +1,20 @@
-"""LLM Client — abstraction over OpenAI API using Codex CLI OAuth tokens.
+"""LLM Client — abstraction over Codex CLI for LLM inference.
 
-Reads the access_token from ~/.codex/auth.json (created by `codex login`).
-Provides async completion with graceful degradation when LLM is unavailable.
+Uses `codex exec` subprocess to call OpenAI models via the user's ChatGPT
+subscription. No API key needed — authentication is handled by Codex CLI.
+
+Corporate SSL is transparent since Codex handles its own TLS.
+Provides async completion with graceful degradation when Codex is unavailable.
 """
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
+import shutil
 from dataclasses import dataclass
-from pathlib import Path
-
-from openai import AsyncOpenAI
 
 logger = logging.getLogger("metascaffold.llm")
-
-_DEFAULT_AUTH_PATH = Path.home() / ".codex" / "auth.json"
 
 
 @dataclass
@@ -33,22 +32,14 @@ class LLMResponse:
 
 
 class LLMClient:
-    """Async OpenAI API client using Codex CLI OAuth tokens."""
+    """Async LLM client using Codex CLI subprocess."""
 
-    def __init__(self, auth_path: Path | None = None):
-        self._auth_path = auth_path or _DEFAULT_AUTH_PATH
-        self._token: str = ""
-        self.enabled: bool = False
-        self._load_token()
-
-    def _load_token(self) -> None:
-        """Load OAuth access_token from Codex auth.json."""
-        try:
-            data = json.loads(self._auth_path.read_text())
-            self._token = data.get("tokens", {}).get("access_token", "")
-            self.enabled = bool(self._token)
-        except (FileNotFoundError, json.JSONDecodeError, KeyError):
-            self.enabled = False
+    def __init__(self, codex_path: str | None = None):
+        if codex_path is not None:
+            self._codex = codex_path
+        else:
+            self._codex = shutil.which("codex") or ""
+        self.enabled: bool = bool(self._codex)
 
     async def complete(
         self,
@@ -59,35 +50,80 @@ class LLMClient:
         max_tokens: int = 2048,
         response_format: dict | None = None,
     ) -> LLMResponse:
-        """Call OpenAI Chat Completions API.
+        """Call LLM via codex exec subprocess.
 
         Returns LLMResponse with content on success, or empty content + error on failure.
+        The model parameter is ignored — Codex uses the model from its config.
         """
         if not self.enabled:
-            return LLMResponse(error="LLM client disabled (no auth token)")
+            return LLMResponse(error="LLM client disabled (codex not found)")
+
+        prompt = f"SYSTEM: {system_prompt}\n\nUSER: {user_prompt}\n\nRespond with ONLY the requested output. No explanations, no tool calls, no file edits."
 
         try:
-            client = AsyncOpenAI(api_key=self._token)
-            kwargs: dict = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            }
-            if response_format:
-                kwargs["response_format"] = response_format
+            proc = await asyncio.create_subprocess_exec(
+                self._codex, "exec",
+                "-c", "sandbox_permissions=[]",
+                prompt,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=120.0,
+            )
+            output = stdout.decode("utf-8", errors="replace").strip()
 
-            resp = await client.chat.completions.create(**kwargs)
+            if proc.returncode != 0:
+                err_text = stderr.decode("utf-8", errors="replace").strip()
+                return LLMResponse(error=f"codex exec failed (exit {proc.returncode}): {err_text[:500]}")
+
+            # Parse codex exec output: the actual response is after the header block
+            # Codex outputs headers, then "codex\n<response>\ntokens used\n<count>"
+            content = self._parse_codex_output(output)
 
             return LLMResponse(
-                content=resp.choices[0].message.content or "",
-                model=resp.model,
-                prompt_tokens=resp.usage.prompt_tokens if resp.usage else 0,
-                completion_tokens=resp.usage.completion_tokens if resp.usage else 0,
+                content=content,
+                model="gpt-5.3-codex",
             )
+        except asyncio.TimeoutError:
+            return LLMResponse(error="codex exec timed out after 120s")
         except Exception as e:
             logger.warning("LLM call failed: %s", e)
             return LLMResponse(error=str(e))
+
+    @staticmethod
+    def _parse_codex_output(raw: str) -> str:
+        """Extract the model response from codex exec output.
+
+        Codex exec outputs:
+          ... header lines ...
+          codex
+          <actual response>
+          tokens used
+          <number>
+          <final repeated text or empty>
+
+        We extract the text between the last 'codex' marker and 'tokens used'.
+        """
+        lines = raw.split("\n")
+
+        # Find last "codex" line (marks start of response)
+        codex_idx = -1
+        for i, line in enumerate(lines):
+            if line.strip() == "codex":
+                codex_idx = i
+
+        if codex_idx == -1:
+            # No codex marker — return entire output as best effort
+            return raw
+
+        # Find "tokens used" after the codex marker
+        tokens_idx = len(lines)
+        for i in range(codex_idx + 1, len(lines)):
+            if lines[i].strip() == "tokens used":
+                tokens_idx = i
+                break
+
+        # Extract content between markers
+        content_lines = lines[codex_idx + 1:tokens_idx]
+        return "\n".join(content_lines).strip()
