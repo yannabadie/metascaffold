@@ -3,14 +3,13 @@
 Provides graceful degradation: if NotebookLM is unavailable, returns empty
 results and the system continues without external knowledge.
 
-The real notebooklm-py API is fully async. This bridge wraps it with sync
-methods using asyncio.run() for compatibility with the MCP server tools.
+The real notebooklm-py API is fully async. This bridge exposes async methods
+natively — the MCP server tools are also async, so no event loop conflict.
 Corporate SSL is handled via truststore (OS cert store injection).
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -41,7 +40,7 @@ async def _get_client():
     """
     _inject_truststore()
     from notebooklm import NotebookLMClient
-    client = await NotebookLMClient.from_storage()
+    client = await NotebookLMClient.from_storage(timeout=120.0)
     return client
 
 
@@ -58,78 +57,63 @@ class NotebookLMBridge:
         self.default_notebook = default_notebook
         self.fallback_on_error = fallback_on_error
 
-    def query_sync(self, question: str, notebook: str | None = None) -> BridgeResult:
-        """Query a NotebookLM notebook synchronously.
-
-        Wraps the async API with asyncio.run() for MCP tool compatibility.
-        """
+    async def query(self, question: str, notebook: str | None = None) -> BridgeResult:
+        """Query a NotebookLM notebook asynchronously."""
         if not self.enabled:
             return BridgeResult(success=False, reason="NotebookLM bridge is disabled")
 
         try:
-            return asyncio.run(self._query_async(question, notebook))
+            target = notebook or self.default_notebook
+            client = await _get_client()
+            async with client:
+                notebooks = await client.notebooks.list()
+                matching = [nb for nb in notebooks if nb.title == target]
+                if not matching:
+                    return BridgeResult(
+                        success=False,
+                        reason=f"Notebook '{target}' not found",
+                    )
+                result = await client.chat.ask(matching[0].id, question)
+                return BridgeResult(success=True, content=result.text)
         except Exception as e:
             logger.warning("NotebookLM query failed: %s", e)
             if self.fallback_on_error:
                 return BridgeResult(success=False, reason=str(e))
             raise
 
-    async def _query_async(self, question: str, notebook: str | None = None) -> BridgeResult:
-        """Async implementation of query."""
-        target = notebook or self.default_notebook
-        client = await _get_client()
-        async with client:
-            notebooks = await client.notebooks.list()
-            matching = [nb for nb in notebooks if nb.title == target]
-            if not matching:
-                return BridgeResult(
-                    success=False,
-                    reason=f"Notebook '{target}' not found",
-                )
-            result = await client.chat.ask(matching[0].id, question)
-            return BridgeResult(success=True, content=result.text)
-
-    def upload_source(self, url: str, notebook: str | None = None) -> BridgeResult:
+    async def upload_source(self, url: str, notebook: str | None = None) -> BridgeResult:
         """Upload a URL source to a NotebookLM notebook."""
         if not self.enabled:
             return BridgeResult(success=False, reason="NotebookLM bridge is disabled")
 
         try:
-            return asyncio.run(self._upload_async(url, notebook))
+            target = notebook or self.default_notebook
+            client = await _get_client()
+            async with client:
+                notebooks = await client.notebooks.list()
+                matching = [nb for nb in notebooks if nb.title == target]
+                if not matching:
+                    return BridgeResult(success=False, reason=f"Notebook '{target}' not found")
+                await client.sources.add_url(matching[0].id, url)
+                return BridgeResult(success=True, content=f"Source uploaded: {url}")
         except Exception as e:
             logger.warning("NotebookLM upload failed: %s", e)
             if self.fallback_on_error:
                 return BridgeResult(success=False, reason=str(e))
             raise
 
-    async def _upload_async(self, url: str, notebook: str | None = None) -> BridgeResult:
-        """Async implementation of upload."""
-        target = notebook or self.default_notebook
-        client = await _get_client()
-        async with client:
-            notebooks = await client.notebooks.list()
-            matching = [nb for nb in notebooks if nb.title == target]
-            if not matching:
-                return BridgeResult(success=False, reason=f"Notebook '{target}' not found")
-            await client.sources.add_url(matching[0].id, url)
-            return BridgeResult(success=True, content=f"Source uploaded: {url}")
-
-    def create_notebook(self, title: str) -> BridgeResult:
+    async def create_notebook(self, title: str) -> BridgeResult:
         """Create a new NotebookLM notebook."""
         if not self.enabled:
             return BridgeResult(success=False, reason="NotebookLM bridge is disabled")
 
         try:
-            return asyncio.run(self._create_async(title))
+            client = await _get_client()
+            async with client:
+                nb = await client.notebooks.create(title=title)
+                return BridgeResult(success=True, content=f"Notebook created: {nb.id}")
         except Exception as e:
             logger.warning("NotebookLM create failed: %s", e)
             if self.fallback_on_error:
                 return BridgeResult(success=False, reason=str(e))
             raise
-
-    async def _create_async(self, title: str) -> BridgeResult:
-        """Async implementation of create."""
-        client = await _get_client()
-        async with client:
-            nb = await client.notebooks.create(title=title)
-            return BridgeResult(success=True, content=f"Notebook created: {nb.id}")

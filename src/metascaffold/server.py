@@ -100,7 +100,7 @@ def metascaffold_classify(
 
 
 @mcp.tool()
-def metascaffold_plan(
+async def metascaffold_plan(
     task: Annotated[str, Field(description="Description of the task to plan")],
     context: Annotated[str, Field(description="Additional context: files involved, scope, constraints")],
 ) -> dict:
@@ -112,7 +112,7 @@ def metascaffold_plan(
     # Optionally consult NotebookLM
     nlm_insights = ""
     if nlm_bridge.enabled:
-        nlm_result = nlm_bridge.query_sync(
+        nlm_result = await nlm_bridge.query(
             f"What are best practices for: {task}? Consider: {context}"
         )
         if nlm_result.success:
@@ -204,7 +204,7 @@ def metascaffold_evaluate(
 
 
 @mcp.tool()
-def metascaffold_nlm_query(
+async def metascaffold_nlm_query(
     question: Annotated[str, Field(description="Question to ask the NotebookLM knowledge base")],
     notebook: Annotated[str, Field(description="Notebook name (uses default if empty)")] = "",
 ) -> dict:
@@ -213,7 +213,7 @@ def metascaffold_nlm_query(
     Returns sourced answers from the MetaScaffold research corpus.
     Degrades gracefully if NotebookLM is unavailable.
     """
-    result = nlm_bridge.query_sync(
+    result = await nlm_bridge.query(
         question=question,
         notebook=notebook or None,
     )
