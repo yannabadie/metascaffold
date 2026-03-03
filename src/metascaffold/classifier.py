@@ -14,6 +14,8 @@ import logging
 import re
 from dataclasses import dataclass, field
 
+from metascaffold.entropy import find_routing_token_entropy
+
 logger = logging.getLogger("metascaffold.classifier")
 
 # ---------------------------------------------------------------------------
@@ -103,10 +105,14 @@ class Classifier:
         system2_threshold: float = 0.8,
         always_system2_tools: list[str] | None = None,
         llm_client: object | None = None,
+        entropy_threshold: float = 0.5,
+        medium_entropy_threshold: float = 0.3,
     ):
         self.system2_threshold = system2_threshold
         self.always_system2_tools = always_system2_tools or []
         self._llm = llm_client
+        self.entropy_threshold = entropy_threshold
+        self.medium_entropy_threshold = medium_entropy_threshold
 
     # -------------------------------------------------------------------
     # Public API
@@ -146,7 +152,7 @@ class Classifier:
                 routing="system2",
                 confidence=0.5,
                 reasoning=f"Tool '{tool_name}' is configured for mandatory System 2",
-                signals={"source": "fast-path"},
+                signals={"source": "fast-path", "compute_level": 2},
             )
 
         # Fast-path: read-only tools
@@ -155,22 +161,138 @@ class Classifier:
                 routing="system1",
                 confidence=0.95,
                 reasoning=f"Read-only tool '{tool_name}'",
-                signals={"source": "fast-path"},
+                signals={"source": "fast-path", "compute_level": 1},
             )
 
-        # Try LLM classification if available
+        # Try entropy-based classification (logprobs via OpenAI API), then
+        # codex exec LLM classification, then heuristic fallback.
         if getattr(self._llm, "enabled", False):
+            # Entropy probe (gpt-4.1-nano via OpenAI API)
+            entropy_result = await self._entropy_classify(
+                tool_name, tool_input, context,
+            )
+            if entropy_result is not None:
+                return entropy_result
+
+            # Fallback: codex exec LLM classification
             llm_result = await self._llm_classify(
                 tool_name, tool_input, context,
             )
             if llm_result is not None:
                 return llm_result
 
-        # Fallback to heuristic classification
+        # Final fallback: heuristic classification
         logger.debug("Falling back to heuristic classification for %s", tool_name)
         return self._heuristic_classify(
             tool_name, tool_input, context, historical_success_rate,
         )
+
+    # -------------------------------------------------------------------
+    # Private: entropy-based classification (v0.3)
+    # -------------------------------------------------------------------
+
+    async def _entropy_classify(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        context: str,
+    ) -> ClassificationResult | None:
+        """Call LLM with logprobs for entropy-based routing. Returns None on failure."""
+        if not hasattr(self._llm, "complete_with_logprobs"):
+            return None
+
+        user_prompt = (
+            f"Tool: {tool_name}\n"
+            f"Input: {json.dumps(tool_input, default=str)}\n"
+            f"Context: {context}"
+        )
+
+        try:
+            response = await self._llm.complete_with_logprobs(
+                model="gpt-4.1-nano",
+                system_prompt=_CLASSIFIER_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                temperature=0.0,
+                max_tokens=256,
+                response_format=_CLASSIFIER_RESPONSE_SCHEMA,
+            )
+
+            if getattr(response, "error", None):
+                logger.warning("Entropy classification error: %s", response.error)
+                return None
+
+            # Parse the textual JSON response
+            data = json.loads(response.content)
+            routing = data.get("routing", "system2")
+            confidence = float(data.get("confidence", 0.5))
+            reasoning = data.get("reasoning", "Entropy-based classification")
+
+            if routing not in ("system1", "system2"):
+                logger.warning("Invalid entropy routing value: %s", routing)
+                return None
+
+            # Compute entropy from logprobs at the routing-decision token
+            token_logprobs = getattr(response, "token_logprobs", None) or []
+            entropy = find_routing_token_entropy(token_logprobs)
+
+            if entropy is not None:
+                if entropy > self.entropy_threshold:
+                    # High entropy -> model is uncertain, force System 2
+                    return ClassificationResult(
+                        routing="system2",
+                        confidence=max(0.0, min(1.0, confidence)),
+                        reasoning=reasoning,
+                        signals={
+                            "source": "entropy",
+                            "entropy": entropy,
+                            "compute_level": 2,
+                        },
+                    )
+                elif entropy > self.medium_entropy_threshold:
+                    # Medium entropy -> keep model routing, compute_level 1.5
+                    return ClassificationResult(
+                        routing=routing,
+                        confidence=max(0.0, min(1.0, confidence)),
+                        reasoning=reasoning,
+                        signals={
+                            "source": "entropy",
+                            "entropy": entropy,
+                            "compute_level": 1.5,
+                        },
+                    )
+                else:
+                    # Low entropy -> trust model routing fully
+                    compute_level = 1 if routing == "system1" else 2
+                    return ClassificationResult(
+                        routing=routing,
+                        confidence=max(0.0, min(1.0, confidence)),
+                        reasoning=reasoning,
+                        signals={
+                            "source": "entropy",
+                            "entropy": entropy,
+                            "compute_level": compute_level,
+                        },
+                    )
+            else:
+                # No routing token found in logprobs -> trust textual answer
+                compute_level = 1 if routing == "system1" else 2
+                return ClassificationResult(
+                    routing=routing,
+                    confidence=max(0.0, min(1.0, confidence)),
+                    reasoning=reasoning,
+                    signals={
+                        "source": "entropy",
+                        "entropy": None,
+                        "compute_level": compute_level,
+                    },
+                )
+
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            logger.warning("Failed to parse entropy classification response: %s", exc)
+            return None
+        except Exception as exc:
+            logger.warning("Unexpected entropy classification failure: %s", exc)
+            return None
 
     # -------------------------------------------------------------------
     # Private: LLM classification

@@ -1,7 +1,8 @@
 """Tests for the System 1/2 classifier."""
 
 import json
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 from unittest.mock import AsyncMock
 
 import pytest
@@ -90,6 +91,7 @@ class _FakeLLMResponse:
     error: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    token_logprobs: list = field(default_factory=list)
 
     @property
     def total_tokens(self) -> int:
@@ -166,3 +168,175 @@ class TestClassifierLLM:
         assert result.routing == "system2"
         assert result.signals.get("source") == "heuristic"
         mock_llm.complete.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Async tests — Entropy-based classification (v0.3)
+# ---------------------------------------------------------------------------
+
+class TestClassifierEntropy:
+    @pytest.mark.asyncio
+    async def test_low_entropy_routes_to_system1(self):
+        """Low entropy (high certainty) should route to system1 with compute_level=1."""
+        # Codex fallback response (should NOT be used)
+        codex_response = _FakeLLMResponse(
+            content=json.dumps({
+                "routing": "system2",
+                "confidence": 0.9,
+                "reasoning": "Codex says system2",
+            }),
+        )
+        # Logprobs response: low entropy (p=0.98 vs 0.02)
+        logprobs_response = _FakeLLMResponse(
+            content=json.dumps({
+                "routing": "system1",
+                "confidence": 0.95,
+                "reasoning": "Simple read operation",
+            }),
+            token_logprobs=[
+                {
+                    "token": "system",
+                    "logprob": math.log(0.98),
+                    "top_logprobs": [
+                        {"token": "system", "logprob": math.log(0.98)},
+                        {"token": "complex", "logprob": math.log(0.02)},
+                    ],
+                },
+            ],
+        )
+
+        mock_llm = _make_llm_client(enabled=True, response=codex_response)
+        mock_llm.complete_with_logprobs = AsyncMock(return_value=logprobs_response)
+        c = Classifier(llm_client=mock_llm)
+
+        result = await c.classify_async(
+            tool_name="Edit",
+            tool_input={"file_path": "/src/app.py"},
+            context="Fix a typo in a comment",
+        )
+
+        assert result.routing == "system1"
+        assert result.signals.get("source") == "entropy"
+        assert result.signals.get("compute_level") == 1
+        assert "entropy" in result.signals
+        # Codex complete() should NOT have been called
+        mock_llm.complete.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_high_entropy_routes_to_system2(self):
+        """High entropy (near-equal probs) should force system2 with compute_level=2."""
+        codex_response = _FakeLLMResponse(
+            content=json.dumps({
+                "routing": "system1",
+                "confidence": 0.7,
+                "reasoning": "Codex says system1",
+            }),
+        )
+        # Logprobs response: high entropy (p=0.55 vs 0.45)
+        logprobs_response = _FakeLLMResponse(
+            content=json.dumps({
+                "routing": "system1",
+                "confidence": 0.6,
+                "reasoning": "Model says system1 but is uncertain",
+            }),
+            token_logprobs=[
+                {
+                    "token": "system",
+                    "logprob": math.log(0.55),
+                    "top_logprobs": [
+                        {"token": "system", "logprob": math.log(0.55)},
+                        {"token": "complex", "logprob": math.log(0.45)},
+                    ],
+                },
+            ],
+        )
+
+        mock_llm = _make_llm_client(enabled=True, response=codex_response)
+        mock_llm.complete_with_logprobs = AsyncMock(return_value=logprobs_response)
+        c = Classifier(llm_client=mock_llm)
+
+        result = await c.classify_async(
+            tool_name="Edit",
+            tool_input={"file_path": "/src/complex.py"},
+            context="Restructure the module",
+        )
+
+        assert result.routing == "system2"
+        assert result.signals.get("source") == "entropy"
+        assert result.signals.get("compute_level") == 2
+        assert result.signals.get("entropy") is not None
+        # Codex complete() should NOT have been called
+        mock_llm.complete.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_medium_entropy_routes_to_system15(self):
+        """Medium entropy should keep model routing with compute_level=1.5."""
+        codex_response = _FakeLLMResponse(
+            content=json.dumps({
+                "routing": "system1",
+                "confidence": 0.8,
+                "reasoning": "Codex says system1",
+            }),
+        )
+        # Logprobs response: medium entropy (p=0.90 vs 0.10 -> ~0.469 bits)
+        logprobs_response = _FakeLLMResponse(
+            content=json.dumps({
+                "routing": "system1",
+                "confidence": 0.8,
+                "reasoning": "Moderate confidence routing",
+            }),
+            token_logprobs=[
+                {
+                    "token": "system",
+                    "logprob": math.log(0.90),
+                    "top_logprobs": [
+                        {"token": "system", "logprob": math.log(0.90)},
+                        {"token": "complex", "logprob": math.log(0.10)},
+                    ],
+                },
+            ],
+        )
+
+        mock_llm = _make_llm_client(enabled=True, response=codex_response)
+        mock_llm.complete_with_logprobs = AsyncMock(return_value=logprobs_response)
+        c = Classifier(llm_client=mock_llm)
+
+        result = await c.classify_async(
+            tool_name="Bash",
+            tool_input={"command": "npm test"},
+            context="Run the test suite",
+        )
+
+        assert result.signals.get("source") == "entropy"
+        assert result.signals.get("compute_level") == 1.5
+        assert result.signals.get("entropy") is not None
+        # Codex complete() should NOT have been called
+        mock_llm.complete.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fallback_to_codex_when_logprobs_fail(self):
+        """When logprobs call fails, fall back to codex LLM classification."""
+        codex_response = _FakeLLMResponse(
+            content=json.dumps({
+                "routing": "system2",
+                "confidence": 0.85,
+                "reasoning": "Codex classification result",
+            }),
+        )
+
+        mock_llm = _make_llm_client(enabled=True, response=codex_response)
+        # complete_with_logprobs raises an error
+        mock_llm.complete_with_logprobs = AsyncMock(side_effect=RuntimeError("API error"))
+        c = Classifier(llm_client=mock_llm)
+
+        result = await c.classify_async(
+            tool_name="Edit",
+            tool_input={"file_path": "/src/app.py"},
+            context="Complex refactoring task",
+        )
+
+        assert result.routing == "system2"
+        assert result.signals.get("source") == "llm"
+        assert result.confidence == pytest.approx(0.85)
+        # Codex complete() should have been called as fallback
+        mock_llm.complete.assert_awaited_once()
