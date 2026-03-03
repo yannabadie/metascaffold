@@ -1,6 +1,7 @@
 """MetaScaffold MCP Server — cognitive middleware for Claude Code.
 
-Exposes 7 tools: classify, plan, sandbox_exec, evaluate, nlm_query, telemetry_query, restart.
+Exposes 9 tools: classify, plan, sandbox_exec, evaluate, nlm_query,
+telemetry_query, restart, distill, reflect.
 Run with: uv run python src/metascaffold/server.py
 Register with: claude mcp add metascaffold -- uv --directory . run python src/metascaffold/server.py
 """
@@ -17,9 +18,13 @@ from mcp.server.fastmcp import FastMCP
 
 from metascaffold.classifier import Classifier
 from metascaffold.config import load_config
+from metascaffold.distiller import Distiller
 from metascaffold.evaluator import Evaluator
+from metascaffold.llm_client import LLMClient
 from metascaffold.notebooklm_bridge import NotebookLMBridge
+from metascaffold.pipeline import CognitivePipeline, PipelineState
 from metascaffold.planner import Planner
+from metascaffold.reflector import Reflector
 from metascaffold.sandbox import Sandbox, SandboxResult
 from metascaffold.telemetry import CognitiveEvent, TelemetryLogger
 
@@ -34,14 +39,20 @@ logger = logging.getLogger("metascaffold")
 # Load configuration
 config = load_config()
 
-# Initialize components
+# Initialize LLM client (auto-detects codex binary)
+llm_client = LLMClient()
+
+# Initialize components (with optional LLM upgrade)
+_llm = llm_client if config.llm.enabled else None
+
 classifier = Classifier(
     system2_threshold=config.classifier.system2_threshold,
     always_system2_tools=config.classifier.always_system2_tools,
+    llm_client=_llm,
 )
-planner = Planner()
+planner = Planner(llm_client=_llm)
 sandbox = Sandbox(default_timeout_seconds=config.sandbox.default_timeout_seconds)
-evaluator = Evaluator(max_retry_attempts=config.sandbox.max_retry_attempts)
+evaluator = Evaluator(max_retry_attempts=config.sandbox.max_retry_attempts, llm_client=_llm)
 telemetry = TelemetryLogger(
     json_dir=config.telemetry.json_dir,
     sqlite_path=config.telemetry.sqlite_path,
@@ -52,12 +63,25 @@ nlm_bridge = NotebookLMBridge(
     fallback_on_error=config.notebooklm.fallback_on_error,
 )
 
+# New v0.2 components
+distiller = Distiller(llm_client=_llm)
+reflector = Reflector(llm_client=_llm)
+
+# Pipeline orchestrator
+pipeline = CognitivePipeline(
+    classifier=classifier,
+    distiller=distiller,
+    planner=planner,
+    evaluator=evaluator,
+    reflector=reflector,
+)
+
 # Create MCP server
 mcp = FastMCP("metascaffold")
 
 
 @mcp.tool()
-def metascaffold_classify(
+async def metascaffold_classify(
     tool_name: Annotated[str, Field(description="Name of the tool being called (Bash, Edit, Write, etc.)")],
     tool_input: Annotated[str, Field(description="JSON string of the tool's input parameters")],
     context: Annotated[str, Field(description="Natural language description of what is being done")],
@@ -73,7 +97,7 @@ def metascaffold_classify(
     # Check historical success rate from telemetry
     historical_rate = telemetry.get_success_rate(context[:50])
 
-    result = classifier.classify(
+    result = await classifier.classify_async(
         tool_name=tool_name,
         tool_input=parsed_input,
         context=context,
@@ -119,7 +143,7 @@ async def metascaffold_plan(
         if nlm_result.success:
             nlm_insights = nlm_result.content
 
-    plan = planner.create_plan(
+    plan = await planner.create_plan_async(
         task=task,
         context=context,
         notebooklm_insights=nlm_insights,
@@ -167,7 +191,7 @@ def metascaffold_sandbox_exec(
 
 
 @mcp.tool()
-def metascaffold_evaluate(
+async def metascaffold_evaluate(
     exit_code: Annotated[int, Field(description="Exit code from the executed command")],
     stdout: Annotated[str, Field(description="Standard output from the command")],
     stderr: Annotated[str, Field(description="Standard error from the command")],
@@ -187,7 +211,7 @@ def metascaffold_evaluate(
         duration_ms=duration_ms,
         timed_out=timed_out,
     )
-    result = evaluator.evaluate(sandbox_result=sandbox_result, attempt=attempt)
+    result = await evaluator.evaluate_async(sandbox_result=sandbox_result, attempt=attempt)
 
     # Log evaluation
     telemetry.log(CognitiveEvent(
@@ -238,15 +262,52 @@ def metascaffold_telemetry_query(
     }
 
 
+@mcp.tool()
+async def metascaffold_distill(
+    task: Annotated[str, Field(description="Raw task description to distill")],
+    context: Annotated[str, Field(description="Additional context about the codebase")],
+) -> dict:
+    """Distill a raw task into a structured template with objectives, constraints, and target files.
+
+    Uses LLM to extract structured task information from natural language.
+    Falls back to passthrough when LLM is unavailable.
+    """
+    template = await distiller.distill(task=task, context=context)
+    telemetry.log(CognitiveEvent(
+        event_type="distillation",
+        data={"task": task[:100], "objective": template.objective[:100]},
+    ))
+    telemetry.flush()
+    return template.to_dict()
+
+
+@mcp.tool()
+async def metascaffold_reflect(
+    event_count: Annotated[int, Field(description="Number of recent events to analyze")] = 50,
+) -> dict:
+    """Analyze recent cognitive telemetry and extract learning patterns.
+
+    Uses LLM to identify rules and procedures from past evaluations.
+    Returns empty results when LLM is unavailable.
+    """
+    events = telemetry.get_recent_events(event_count)
+    result = await reflector.reflect(events)
+    return result.to_dict()
+
+
 # Module reload order — dependencies first
 _RELOAD_ORDER = [
     "metascaffold.config",
     "metascaffold.telemetry",
     "metascaffold.notebooklm_bridge",
+    "metascaffold.llm_client",
     "metascaffold.classifier",
     "metascaffold.planner",
     "metascaffold.sandbox",
     "metascaffold.evaluator",
+    "metascaffold.distiller",
+    "metascaffold.reflector",
+    "metascaffold.pipeline",
 ]
 
 
@@ -256,7 +317,8 @@ def _reload_components() -> list[str]:
     Returns the list of successfully reloaded module names.
     On error, preserves existing components and returns what was reloaded.
     """
-    global config, classifier, planner, sandbox, evaluator, telemetry, nlm_bridge
+    global config, llm_client, classifier, planner, sandbox, evaluator
+    global telemetry, nlm_bridge, distiller, reflector, pipeline
 
     reloaded: list[str] = []
     for mod_name in _RELOAD_ORDER:
@@ -271,22 +333,30 @@ def _reload_components() -> list[str]:
 
     # Re-import classes from freshly reloaded modules
     from metascaffold.config import load_config as _load_config
+    from metascaffold.llm_client import LLMClient as _LLMClient
     from metascaffold.classifier import Classifier as _Classifier
     from metascaffold.planner import Planner as _Planner
     from metascaffold.sandbox import Sandbox as _Sandbox
     from metascaffold.evaluator import Evaluator as _Evaluator
     from metascaffold.telemetry import TelemetryLogger as _TelemetryLogger
     from metascaffold.notebooklm_bridge import NotebookLMBridge as _NotebookLMBridge
+    from metascaffold.distiller import Distiller as _Distiller
+    from metascaffold.reflector import Reflector as _Reflector
+    from metascaffold.pipeline import CognitivePipeline as _CognitivePipeline
 
     # Re-instantiate with fresh config
     config = _load_config()
+    llm_client = _LLMClient()
+    _llm = llm_client if config.llm.enabled else None
+
     classifier = _Classifier(
         system2_threshold=config.classifier.system2_threshold,
         always_system2_tools=config.classifier.always_system2_tools,
+        llm_client=_llm,
     )
-    planner = _Planner()
+    planner = _Planner(llm_client=_llm)
     sandbox = _Sandbox(default_timeout_seconds=config.sandbox.default_timeout_seconds)
-    evaluator = _Evaluator(max_retry_attempts=config.sandbox.max_retry_attempts)
+    evaluator = _Evaluator(max_retry_attempts=config.sandbox.max_retry_attempts, llm_client=_llm)
     telemetry = _TelemetryLogger(
         json_dir=config.telemetry.json_dir,
         sqlite_path=config.telemetry.sqlite_path,
@@ -295,6 +365,15 @@ def _reload_components() -> list[str]:
         enabled=config.notebooklm.enabled,
         default_notebook=config.notebooklm.default_notebook,
         fallback_on_error=config.notebooklm.fallback_on_error,
+    )
+    distiller = _Distiller(llm_client=_llm)
+    reflector = _Reflector(llm_client=_llm)
+    pipeline = _CognitivePipeline(
+        classifier=classifier,
+        distiller=distiller,
+        planner=planner,
+        evaluator=evaluator,
+        reflector=reflector,
     )
 
     logger.info("Hot-reloaded %d modules: %s", len(reloaded), reloaded)

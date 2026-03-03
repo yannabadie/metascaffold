@@ -36,3 +36,13 @@ class TestMCPServerRegistration:
         """metascaffold_telemetry_query tool should be registered."""
         tool_names = [t.name for t in mcp._tool_manager.list_tools()]
         assert "metascaffold_telemetry_query" in tool_names
+
+    def test_server_has_distill_tool(self):
+        """metascaffold_distill tool should be registered."""
+        tool_names = [t.name for t in mcp._tool_manager.list_tools()]
+        assert "metascaffold_distill" in tool_names
+
+    def test_server_has_reflect_tool(self):
+        """metascaffold_reflect tool should be registered."""
+        tool_names = [t.name for t in mcp._tool_manager.list_tools()]
+        assert "metascaffold_reflect" in tool_names

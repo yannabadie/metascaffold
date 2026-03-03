@@ -90,6 +90,36 @@ class TelemetryLogger:
         with open(json_path, "w") as f:
             json.dump(self._events, f, indent=2)
 
+    def get_recent_events(self, count: int = 50) -> list[dict]:
+        """Return the most recent *count* events from SQLite.
+
+        Each dict has keys: session_id, timestamp, event_type, data.
+        Returns an empty list if the database is empty or on error.
+        """
+        try:
+            conn = sqlite3.connect(self._sqlite_path)
+            rows = conn.execute(
+                """
+                SELECT session_id, timestamp, event_type, data_json
+                FROM events
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (count,),
+            ).fetchall()
+            conn.close()
+            events = []
+            for session_id, timestamp, event_type, data_json in reversed(rows):
+                events.append({
+                    "session_id": session_id,
+                    "timestamp": timestamp,
+                    "event_type": event_type,
+                    "data": json.loads(data_json) if data_json else {},
+                })
+            return events
+        except Exception:
+            return []
+
     def get_success_rate(self, task_type: str) -> float | None:
         """Query historical success rate for a given task type.
 
