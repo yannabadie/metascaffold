@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, field
 
 from metascaffold.sandbox import SandboxResult
+from metascaffold.verifiers import VerificationSuite
 
 logger = logging.getLogger("metascaffold.evaluator")
 
@@ -157,15 +158,50 @@ class Evaluator:
         self,
         sandbox_result: SandboxResult,
         attempt: int = 1,
+        code_output: str | None = None,
     ) -> EvaluationResult:
         """Async evaluation: tries LLM-as-Judge first, falls back to heuristics.
 
         The LLM path provides structured SOFAI feedback, adversarial analysis,
         and PAG revision gating. On any LLM failure, falls back silently to
         heuristic evaluation.
+
+        If *code_output* is provided, deterministic verifiers run BEFORE the
+        LLM call.  Critical verifier failures (e.g. SyntaxError) short-circuit
+        to ``backtrack`` without spending LLM tokens.
         """
+        # --- deterministic verifier gate (v0.3) ---
+        verifier_findings: list[dict] | None = None
+        if code_output is not None:
+            suite = VerificationSuite()
+            verifier_results = suite.verify_code(code_output)
+            verifier_findings = [r.to_dict() for r in verifier_results]
+
+            if suite.has_critical_failures(verifier_results):
+                failure_details = "; ".join(
+                    r.detail for r in verifier_results
+                    if not r.passed and r.severity == "critical"
+                )
+                return EvaluationResult(
+                    verdict="backtrack",
+                    confidence=0.95,
+                    issues=[
+                        Issue(
+                            type="verifier",
+                            detail=failure_details,
+                            severity="critical",
+                        )
+                    ],
+                    attempt=attempt,
+                    max_attempts=self.max_retry_attempts,
+                    feedback={"verifier_failures": verifier_findings},
+                )
+
+        # --- LLM-as-Judge path ---
         if self._llm_client and self._llm_client.enabled:
-            llm_result = await self._llm_evaluate(sandbox_result, attempt)
+            llm_result = await self._llm_evaluate(
+                sandbox_result, attempt, verifier_findings=verifier_findings,
+            )
             if llm_result is not None:
                 return llm_result
             logger.warning("LLM evaluation failed, falling back to heuristics")
@@ -241,6 +277,7 @@ class Evaluator:
         self,
         sandbox_result: SandboxResult,
         attempt: int = 1,
+        verifier_findings: list[dict] | None = None,
     ) -> EvaluationResult | None:
         """LLM-as-Judge evaluation with SOFAI feedback and adversarial check.
 
@@ -254,6 +291,10 @@ class Evaluator:
             f"\n--- stdout (truncated) ---\n{sandbox_result.stdout[:2000]}\n"
             f"\n--- stderr (truncated) ---\n{sandbox_result.stderr[:2000]}"
         )
+
+        if verifier_findings:
+            import json as _json
+            user_prompt += f"\n\n--- deterministic verifiers ---\n{_json.dumps(verifier_findings, indent=2)}"
 
         try:
             response = await self._llm_client.complete(

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from metascaffold.evaluator import Evaluator, EvaluationResult
 from metascaffold.sandbox import SandboxResult
+from metascaffold.verifiers import VerificationSuite, VerifierResult
 
 
 class TestEvaluator:
@@ -254,3 +255,74 @@ class TestEvaluatorLLM:
         )
 
         assert result.verdict == "escalate"
+
+
+class TestEvaluatorWithVerifiers:
+    """Tests for deterministic verifier integration in evaluator pipeline."""
+
+    @pytest.mark.asyncio
+    async def test_ast_failure_returns_backtrack_without_llm(self):
+        """Broken syntax triggers backtrack via verifier — LLM is never called."""
+        mock_client = AsyncMock()
+        mock_client.enabled = True
+        mock_client.complete = AsyncMock()
+
+        evaluator = Evaluator(max_retry_attempts=3, llm_client=mock_client)
+        result = await evaluator.evaluate_async(
+            sandbox_result=SandboxResult(
+                exit_code=0, stdout="", stderr="", duration_ms=100,
+            ),
+            attempt=1,
+            code_output="def foo(\n",
+        )
+
+        assert result.verdict == "backtrack"
+        assert result.confidence == 0.95
+        assert any(i.type == "verifier" for i in result.issues)
+        mock_client.complete.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_valid_code_proceeds_to_llm(self):
+        """Valid code passes verifier check — LLM-as-Judge is called normally."""
+        llm_response = {
+            "verdict": "pass",
+            "confidence": 0.9,
+            "feedback": {
+                "failing_tests": [],
+                "error_lines": [],
+                "root_cause": "",
+                "suggested_fix": "",
+            },
+            "adversarial_findings": [],
+            "revision_allowed": True,
+        }
+        mock_client = AsyncMock()
+        mock_client.enabled = True
+        mock_client.complete = AsyncMock(return_value=MagicMock(
+            content=json.dumps(llm_response),
+            error="",
+        ))
+
+        evaluator = Evaluator(max_retry_attempts=3, llm_client=mock_client)
+        result = await evaluator.evaluate_async(
+            sandbox_result=SandboxResult(
+                exit_code=0, stdout="ok", stderr="", duration_ms=100,
+            ),
+            attempt=1,
+            code_output="def foo():\n    return 42\n",
+        )
+
+        assert result.verdict == "pass"
+        mock_client.complete.assert_awaited_once()
+
+    def test_heuristic_evaluation_unchanged_without_code(self):
+        """Sync evaluate() without code_output is unaffected by verifier integration."""
+        evaluator = Evaluator(max_retry_attempts=3)
+        result = evaluator.evaluate(
+            sandbox_result=SandboxResult(
+                exit_code=0, stdout="ok", stderr="", duration_ms=100,
+            ),
+            attempt=1,
+        )
+
+        assert result.verdict == "pass"
