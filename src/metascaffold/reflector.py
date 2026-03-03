@@ -24,8 +24,17 @@ Focus on:
 - Patterns in successes (what keeps working?)
 - Recurring backtracks or escalations (what should the agent avoid?)
 
-Return ONLY valid JSON:
-{"rules": ["..."], "procedures": ["..."]}"""
+Return a JSON object with rules and procedures arrays."""
+
+_REFLECTOR_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "rules": {"type": "array", "items": {"type": "string"}},
+        "procedures": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["rules", "procedures"],
+    "additionalProperties": False,
+}
 
 
 @dataclass
@@ -74,6 +83,7 @@ class Reflector:
                 system_prompt=_REFLECTOR_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 max_tokens=1024,
+                response_format=_REFLECTOR_RESPONSE_SCHEMA,
             )
             if resp.error:
                 return None

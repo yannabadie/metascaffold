@@ -66,9 +66,19 @@ Criteria for System 1:
 - The task is well-understood with a clear, single-step solution
 - Read-only or informational operations
 
-Respond with ONLY a JSON object (no markdown fences):
-{"routing": "system1" or "system2", "confidence": 0.0 to 1.0, "reasoning": "brief explanation"}
+Respond with a JSON object with routing, confidence, and reasoning fields.
 """
+
+_CLASSIFIER_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "routing": {"type": "string", "enum": ["system1", "system2"]},
+        "confidence": {"type": "number"},
+        "reasoning": {"type": "string"},
+    },
+    "required": ["routing", "confidence", "reasoning"],
+    "additionalProperties": False,
+}
 
 
 @dataclass
@@ -185,7 +195,7 @@ class Classifier:
                 user_prompt=user_prompt,
                 temperature=0.0,
                 max_tokens=256,
-                response_format={"type": "json_object"},
+                response_format=_CLASSIFIER_RESPONSE_SCHEMA,
             )
 
             if response.error:

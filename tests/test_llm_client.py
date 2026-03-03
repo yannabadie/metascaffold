@@ -1,6 +1,8 @@
 """Tests for the LLM client abstraction (codex exec subprocess)."""
 
 import asyncio
+import json
+from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
 
 import pytest
@@ -113,6 +115,135 @@ class TestLLMClient:
         )
         assert result.content == ""
         assert "timed out" in result.error.lower()
+
+
+class TestCompleteWithSchema:
+    """Tests for structured JSON output via --output-schema."""
+
+    @patch("metascaffold.llm_client.asyncio.create_subprocess_exec")
+    async def test_schema_path_returns_json_from_output_file(self, mock_exec):
+        """complete() with response_format should use --output-schema and read from -o file."""
+        expected_json = '{"routing": "system2", "confidence": 0.95, "reasoning": "test"}'
+
+        async def fake_communicate():
+            # Simulate codex writing the output file
+            args = mock_exec.call_args[0]
+            for i, a in enumerate(args):
+                if str(a) == "-o" and i + 1 < len(args):
+                    Path(args[i + 1]).write_text(expected_json)
+            return (b"", b"")
+
+        mock_proc = AsyncMock()
+        mock_proc.communicate = fake_communicate
+        mock_proc.returncode = 0
+        mock_exec.return_value = mock_proc
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "routing": {"type": "string"},
+                "confidence": {"type": "number"},
+                "reasoning": {"type": "string"},
+            },
+            "required": ["routing", "confidence", "reasoning"],
+            "additionalProperties": False,
+        }
+
+        client = LLMClient(codex_path="/usr/bin/codex")
+        result = await client.complete(
+            model="test",
+            system_prompt="sys",
+            user_prompt="usr",
+            response_format=schema,
+        )
+
+        assert result.content == expected_json
+        assert result.error == ""
+        assert result.model == "gpt-5.3-codex"
+
+        # Verify --output-schema and -o flags were passed
+        call_args = mock_exec.call_args[0]
+        assert "--output-schema" in call_args
+        assert "-o" in call_args
+
+    @patch("metascaffold.llm_client.asyncio.create_subprocess_exec")
+    async def test_schema_path_adds_additional_properties(self, mock_exec):
+        """Schema without additionalProperties should get it auto-added."""
+        async def fake_communicate():
+            args = mock_exec.call_args[0]
+            for i, a in enumerate(args):
+                if str(a) == "--output-schema" and i + 1 < len(args):
+                    written_schema = json.loads(Path(args[i + 1]).read_text())
+                    assert written_schema["additionalProperties"] is False
+                if str(a) == "-o" and i + 1 < len(args):
+                    Path(args[i + 1]).write_text('{"result": "ok"}')
+            return (b"", b"")
+
+        mock_proc = AsyncMock()
+        mock_proc.communicate = fake_communicate
+        mock_proc.returncode = 0
+        mock_exec.return_value = mock_proc
+
+        # Schema WITHOUT additionalProperties
+        schema = {
+            "type": "object",
+            "properties": {"result": {"type": "string"}},
+            "required": ["result"],
+        }
+
+        client = LLMClient(codex_path="/usr/bin/codex")
+        result = await client.complete(
+            model="test", system_prompt="s", user_prompt="u",
+            response_format=schema,
+        )
+        assert result.content == '{"result": "ok"}'
+
+    @patch("metascaffold.llm_client.asyncio.create_subprocess_exec")
+    async def test_schema_path_handles_no_output_file(self, mock_exec):
+        """When codex produces no output file, return error."""
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+        mock_proc.returncode = 0
+        mock_exec.return_value = mock_proc
+
+        schema = {
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+            "required": ["x"],
+            "additionalProperties": False,
+        }
+
+        client = LLMClient(codex_path="/usr/bin/codex")
+        result = await client.complete(
+            model="test", system_prompt="s", user_prompt="u",
+            response_format=schema,
+        )
+        assert result.content == ""
+        assert "no output" in result.error.lower()
+
+    @patch("metascaffold.llm_client.asyncio.create_subprocess_exec")
+    async def test_schema_path_handles_subprocess_error(self, mock_exec):
+        """When codex exec fails with non-zero exit, return error."""
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b"schema validation error"))
+        mock_proc.returncode = 1
+        mock_exec.return_value = mock_proc
+
+        schema = {
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+            "required": ["x"],
+            "additionalProperties": False,
+        }
+
+        client = LLMClient(codex_path="/usr/bin/codex")
+        result = await client.complete(
+            model="test", system_prompt="s", user_prompt="u",
+            response_format=schema,
+        )
+        assert result.content == ""
+        assert "failed" in result.error.lower()
+        assert "schema validation" in result.error.lower()
 
 
 class TestParseCodexOutput:

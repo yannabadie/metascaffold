@@ -39,7 +39,7 @@ class TestDistiller:
                 "objective": "Add JWT-based authentication to the FastAPI application",
                 "constraints": ["Use python-jose for JWT", "Support token refresh"],
                 "target_files": ["src/api/auth.py", "src/api/middleware.py"],
-                "variables": {"token_expiry": "30m", "algorithm": "HS256"},
+                "variables": [{"key": "token_expiry", "value": "30m"}, {"key": "algorithm", "value": "HS256"}],
             }),
             error=""
         ))

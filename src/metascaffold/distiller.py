@@ -21,13 +21,31 @@ Extract:
 - target_files: files likely affected (infer from context)
 - variables: key parameters, values, or configuration mentioned
 
-Return ONLY valid JSON:
-{
-  "objective": "...",
-  "constraints": ["..."],
-  "target_files": ["..."],
-  "variables": {"key": "value"}
-}"""
+Return a JSON object with objective, constraints, target_files, and variables fields.
+Variables should be an array of {"key": "...", "value": "..."} objects."""
+
+_DISTILLER_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "objective": {"type": "string"},
+        "constraints": {"type": "array", "items": {"type": "string"}},
+        "target_files": {"type": "array", "items": {"type": "string"}},
+        "variables": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                    "value": {"type": "string"},
+                },
+                "required": ["key", "value"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["objective", "constraints", "target_files", "variables"],
+    "additionalProperties": False,
+}
 
 
 @dataclass
@@ -72,15 +90,23 @@ class Distiller:
                 system_prompt=_DISTILLER_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 max_tokens=512,
+                response_format=_DISTILLER_RESPONSE_SCHEMA,
             )
             if resp.error:
                 return None
             data = json.loads(resp.content)
+            # Variables come as [{key, value}] array from structured output
+            raw_vars = data.get("variables", [])
+            variables = (
+                {v["key"]: v["value"] for v in raw_vars}
+                if isinstance(raw_vars, list)
+                else raw_vars if isinstance(raw_vars, dict) else {}
+            )
             return TaskTemplate(
                 objective=data.get("objective", task),
                 constraints=data.get("constraints", []),
                 target_files=data.get("target_files", []),
-                variables=data.get("variables", {}),
+                variables=variables,
             )
         except (json.JSONDecodeError, Exception) as e:
             logger.warning("LLM distillation failed: %s", e)

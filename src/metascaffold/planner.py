@@ -86,6 +86,31 @@ at least 1 risk, and a rollback plan.
 - Return ONLY the JSON object, no markdown fences or commentary.
 """
 
+_PLANNER_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "strategies": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "description": {"type": "string"},
+                    "steps": {"type": "array", "items": {"type": "string"}},
+                    "confidence": {"type": "number"},
+                    "risks": {"type": "array", "items": {"type": "string"}},
+                    "rollback_plan": {"type": "string"},
+                },
+                "required": ["id", "description", "steps", "confidence", "risks", "rollback_plan"],
+                "additionalProperties": False,
+            },
+        },
+        "recommended": {"type": "string"},
+    },
+    "required": ["strategies", "recommended"],
+    "additionalProperties": False,
+}
+
 
 class Planner:
     """Planner that decomposes tasks into strategies.
@@ -264,7 +289,7 @@ class Planner:
                 user_prompt=user_prompt,
                 temperature=0.2,
                 max_tokens=2048,
-                response_format={"type": "json_object"},
+                response_format=_PLANNER_RESPONSE_SCHEMA,
             )
 
             if response.error:

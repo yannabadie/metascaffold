@@ -60,6 +60,40 @@ Rules:
 - Set revision_allowed=false if the output is too dangerous or ambiguous to auto-fix
 """
 
+_EVALUATOR_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["pass", "retry", "backtrack", "escalate"]},
+        "confidence": {"type": "number"},
+        "feedback": {
+            "type": "object",
+            "properties": {
+                "failing_tests": {"type": "array", "items": {"type": "string"}},
+                "error_lines": {"type": "array", "items": {"type": "string"}},
+                "root_cause": {"type": "string"},
+                "suggested_fix": {"type": "string"},
+            },
+            "required": ["failing_tests", "error_lines", "root_cause", "suggested_fix"],
+            "additionalProperties": False,
+        },
+        "adversarial_findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "issue": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                },
+                "required": ["issue", "severity"],
+                "additionalProperties": False,
+            },
+        },
+        "revision_allowed": {"type": "boolean"},
+    },
+    "required": ["verdict", "confidence", "feedback", "adversarial_findings", "revision_allowed"],
+    "additionalProperties": False,
+}
+
 
 @dataclass
 class Issue:
@@ -228,7 +262,7 @@ class Evaluator:
                 user_prompt=user_prompt,
                 temperature=0.0,
                 max_tokens=2048,
-                response_format={"type": "json_object"},
+                response_format=_EVALUATOR_RESPONSE_SCHEMA,
             )
 
             if response.error:
