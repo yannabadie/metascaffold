@@ -8,6 +8,7 @@ dependencies = [
     "pydantic>=2.0",
     "notebooklm-py[browser]>=0.3.0",
     "truststore>=0.10.4",
+    "openai>=1.60.0",
 ]
 
 [project.optional-dependencies]
