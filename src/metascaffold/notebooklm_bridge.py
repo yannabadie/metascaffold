@@ -74,7 +74,7 @@ class NotebookLMBridge:
                         reason=f"Notebook '{target}' not found",
                     )
                 result = await client.chat.ask(matching[0].id, question)
-                return BridgeResult(success=True, content=result.text)
+                return BridgeResult(success=True, content=result.answer)
         except Exception as e:
             logger.warning("NotebookLM query failed: %s", e)
             if self.fallback_on_error:

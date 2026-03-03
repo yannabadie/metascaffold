@@ -32,7 +32,7 @@ class TestNotebookLMBridge:
         mock_nb = MagicMock(title="Test", id="test-id")
         mock_client = AsyncMock()
         mock_client.notebooks.list.return_value = [mock_nb]
-        mock_client.chat.ask.return_value = MagicMock(text="Metacognition is thinking about thinking.")
+        mock_client.chat.ask.return_value = MagicMock(answer="Metacognition is thinking about thinking.")
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_get_client.return_value = mock_client
