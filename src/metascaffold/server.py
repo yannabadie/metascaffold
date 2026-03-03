@@ -1,12 +1,13 @@
 """MetaScaffold MCP Server — cognitive middleware for Claude Code.
 
-Exposes 6 tools: classify, plan, sandbox_exec, evaluate, nlm_query, telemetry_query.
+Exposes 7 tools: classify, plan, sandbox_exec, evaluate, nlm_query, telemetry_query, restart.
 Run with: uv run python src/metascaffold/server.py
 Register with: claude mcp add metascaffold -- uv --directory . run python src/metascaffold/server.py
 """
 
 from __future__ import annotations
 
+import importlib
 import logging
 import sys
 from typing import Annotated
@@ -234,6 +235,86 @@ def metascaffold_telemetry_query(
         "task_type": task_type,
         "success_rate": rate,
         "has_data": rate is not None,
+    }
+
+
+# Module reload order — dependencies first
+_RELOAD_ORDER = [
+    "metascaffold.config",
+    "metascaffold.telemetry",
+    "metascaffold.notebooklm_bridge",
+    "metascaffold.classifier",
+    "metascaffold.planner",
+    "metascaffold.sandbox",
+    "metascaffold.evaluator",
+]
+
+
+def _reload_components() -> list[str]:
+    """Reload all metascaffold modules and re-instantiate components.
+
+    Returns the list of successfully reloaded module names.
+    On error, preserves existing components and returns what was reloaded.
+    """
+    global config, classifier, planner, sandbox, evaluator, telemetry, nlm_bridge
+
+    reloaded: list[str] = []
+    for mod_name in _RELOAD_ORDER:
+        if mod_name not in sys.modules:
+            continue
+        try:
+            importlib.reload(sys.modules[mod_name])
+            reloaded.append(mod_name)
+        except Exception as e:
+            logger.error("Failed to reload %s: %s", mod_name, e)
+            return reloaded
+
+    # Re-import classes from freshly reloaded modules
+    from metascaffold.config import load_config as _load_config
+    from metascaffold.classifier import Classifier as _Classifier
+    from metascaffold.planner import Planner as _Planner
+    from metascaffold.sandbox import Sandbox as _Sandbox
+    from metascaffold.evaluator import Evaluator as _Evaluator
+    from metascaffold.telemetry import TelemetryLogger as _TelemetryLogger
+    from metascaffold.notebooklm_bridge import NotebookLMBridge as _NotebookLMBridge
+
+    # Re-instantiate with fresh config
+    config = _load_config()
+    classifier = _Classifier(
+        system2_threshold=config.classifier.system2_threshold,
+        always_system2_tools=config.classifier.always_system2_tools,
+    )
+    planner = _Planner()
+    sandbox = _Sandbox(default_timeout_seconds=config.sandbox.default_timeout_seconds)
+    evaluator = _Evaluator(max_retry_attempts=config.sandbox.max_retry_attempts)
+    telemetry = _TelemetryLogger(
+        json_dir=config.telemetry.json_dir,
+        sqlite_path=config.telemetry.sqlite_path,
+    )
+    nlm_bridge = _NotebookLMBridge(
+        enabled=config.notebooklm.enabled,
+        default_notebook=config.notebooklm.default_notebook,
+        fallback_on_error=config.notebooklm.fallback_on_error,
+    )
+
+    logger.info("Hot-reloaded %d modules: %s", len(reloaded), reloaded)
+    return reloaded
+
+
+@mcp.tool()
+def metascaffold_restart() -> dict:
+    """Hot-reload all MetaScaffold modules and re-instantiate components.
+
+    Reloads Python modules via importlib.reload without killing the server
+    process. The MCP connection stays alive — no reconnect needed.
+    Use after modifying MetaScaffold source code.
+    """
+    telemetry.flush()
+    reloaded = _reload_components()
+    return {
+        "status": "reloaded",
+        "modules": reloaded,
+        "count": len(reloaded),
     }
 
 
