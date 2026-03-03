@@ -50,12 +50,24 @@ class McpServerConfig:
 
 
 @dataclass
+class LLMConfig:
+    enabled: bool = True
+    fallback_to_heuristics: bool = True
+    classifier_model: str = "gpt-4.1-nano"
+    evaluator_model: str = "o3-mini"
+    planner_model: str = "gpt-4.1-mini"
+    distiller_model: str = "gpt-4.1-nano"
+    reflector_model: str = "o3-mini"
+
+
+@dataclass
 class MetaScaffoldConfig:
     classifier: ClassifierConfig = field(default_factory=ClassifierConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     notebooklm: NotebookLMConfig = field(default_factory=NotebookLMConfig)
     mcp_server: McpServerConfig = field(default_factory=McpServerConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
 
 
 def _expand_path(p: str) -> str:
@@ -102,6 +114,9 @@ def _dict_to_config(data: dict) -> MetaScaffoldConfig:
 
     if "mcp_server" in data:
         cfg.mcp_server = McpServerConfig(**data["mcp_server"])
+
+    if "llm" in data:
+        cfg.llm = LLMConfig(**data["llm"])
 
     return cfg
 

@@ -23,3 +23,12 @@ fallback_on_error = true
 [mcp_server]
 host = "127.0.0.1"
 port = 8787
+
+[llm]
+enabled = true
+fallback_to_heuristics = true
+classifier_model = "gpt-4.1-nano"
+evaluator_model = "o3-mini"
+planner_model = "gpt-4.1-mini"
+distiller_model = "gpt-4.1-nano"
+reflector_model = "o3-mini"

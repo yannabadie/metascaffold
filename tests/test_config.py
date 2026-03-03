@@ -38,3 +38,14 @@ class TestMetaScaffoldConfig:
         assert isinstance(config.classifier.always_system2_tools, list)
         assert isinstance(config.sandbox.network_access, bool)
         assert isinstance(config.notebooklm.fallback_on_error, bool)
+
+    def test_llm_config_defaults(self):
+        """LLM config should have default models for each component."""
+        cfg = load_config()
+        assert cfg.llm.classifier_model == "gpt-4.1-nano"
+        assert cfg.llm.evaluator_model == "o3-mini"
+        assert cfg.llm.planner_model == "gpt-4.1-mini"
+        assert cfg.llm.distiller_model == "gpt-4.1-nano"
+        assert cfg.llm.reflector_model == "o3-mini"
+        assert cfg.llm.enabled is True
+        assert cfg.llm.fallback_to_heuristics is True
