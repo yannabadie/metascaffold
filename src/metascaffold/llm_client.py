@@ -15,9 +15,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger("metascaffold.llm")
@@ -31,6 +32,7 @@ class LLMResponse:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     error: str = ""
+    token_logprobs: list[dict] = field(default_factory=list)
 
     @property
     def total_tokens(self) -> int:
@@ -138,6 +140,99 @@ class LLMClient:
 
         content = self._parse_codex_output(output)
         return LLMResponse(content=content, model="gpt-5.3-codex")
+
+    async def complete_with_logprobs(
+        self,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.0,
+        max_tokens: int = 64,
+        top_logprobs: int = 5,
+    ) -> LLMResponse:
+        """Call OpenAI API directly to get token logprobs.
+
+        This does NOT use codex exec. It requires the OPEN_API_KEY env var.
+        Used by the Classifier for entropy-based System 1/System 2 routing.
+        """
+        api_key = os.environ.get("OPEN_API_KEY", "")
+        if not api_key:
+            return LLMResponse(
+                error="OPEN_API_KEY not set — cannot call OpenAI API for logprobs"
+            )
+
+        try:
+            return self._call_openai_with_logprobs(
+                api_key=api_key,
+                model=model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_logprobs=top_logprobs,
+            )
+        except Exception as e:
+            logger.warning("OpenAI logprobs call failed: %s", e)
+            return LLMResponse(error=str(e))
+
+    def _call_openai_with_logprobs(
+        self,
+        api_key: str,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float,
+        max_tokens: int,
+        top_logprobs: int,
+    ) -> LLMResponse:
+        """Synchronous helper that creates the OpenAI client and calls the API."""
+        # Inject corporate SSL certs (non-critical — catch and continue)
+        try:
+            import truststore
+            truststore.inject_into_ssl()
+        except Exception:
+            pass
+
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
+            logprobs=True,
+            top_logprobs=top_logprobs,
+        )
+
+        choice = response.choices[0]
+        content = choice.message.content or ""
+
+        # Extract token logprobs
+        token_logprobs: list[dict] = []
+        if choice.logprobs and choice.logprobs.content:
+            for token_info in choice.logprobs.content:
+                entry: dict = {
+                    "token": token_info.token,
+                    "logprob": token_info.logprob,
+                    "top_logprobs": [
+                        {"token": tp.token, "logprob": tp.logprob}
+                        for tp in (token_info.top_logprobs or [])
+                    ],
+                }
+                token_logprobs.append(entry)
+
+        usage = response.usage
+        return LLMResponse(
+            content=content,
+            model=response.model or model,
+            prompt_tokens=usage.prompt_tokens if usage else 0,
+            completion_tokens=usage.completion_tokens if usage else 0,
+            token_logprobs=token_logprobs,
+        )
 
     @staticmethod
     def _parse_codex_output(raw: str) -> str:

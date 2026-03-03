@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
 
@@ -266,3 +267,67 @@ class TestParseCodexOutput:
         """Should handle JSON responses correctly."""
         raw = 'header\ncodex\n{"verdict": "pass"}\ntokens used\n50'
         assert LLMClient._parse_codex_output(raw) == '{"verdict": "pass"}'
+
+
+class TestCompleteWithLogprobs:
+    """Tests for the OpenAI direct API path with logprobs."""
+
+    @patch.dict(os.environ, {"OPEN_API_KEY": "sk-test-key"})
+    @patch("metascaffold.llm_client.LLMClient._call_openai_with_logprobs")
+    async def test_returns_logprobs_on_success(self, mock_call):
+        """complete_with_logprobs() should return content and token_logprobs on success."""
+        mock_call.return_value = LLMResponse(
+            content="Hello world",
+            model="gpt-4o",
+            prompt_tokens=10,
+            completion_tokens=5,
+            token_logprobs=[
+                {"token": "Hello", "logprob": -0.1, "top_logprobs": [{"token": "Hello", "logprob": -0.1}]},
+                {"token": " world", "logprob": -0.2, "top_logprobs": [{"token": " world", "logprob": -0.2}]},
+            ],
+        )
+
+        client = LLMClient(codex_path="")
+        result = await client.complete_with_logprobs(
+            model="gpt-4o",
+            system_prompt="You are a helpful assistant.",
+            user_prompt="Say hello.",
+        )
+
+        assert result.content == "Hello world"
+        assert result.model == "gpt-4o"
+        assert result.error == ""
+        assert len(result.token_logprobs) == 2
+        assert result.token_logprobs[0]["token"] == "Hello"
+        assert result.token_logprobs[0]["logprob"] == -0.1
+
+    @patch.dict(os.environ, {}, clear=True)
+    async def test_returns_error_when_no_api_key(self):
+        """complete_with_logprobs() should return error when OPEN_API_KEY is missing."""
+        # Ensure key is absent
+        env_copy = os.environ.copy()
+        env_copy.pop("OPEN_API_KEY", None)
+        with patch.dict(os.environ, env_copy, clear=True):
+            client = LLMClient(codex_path="")
+            result = await client.complete_with_logprobs(
+                model="gpt-4o",
+                system_prompt="test",
+                user_prompt="test",
+            )
+            assert result.content == ""
+            assert "api key" in result.error.lower() or "OPEN_API_KEY" in result.error
+
+    @patch.dict(os.environ, {"OPEN_API_KEY": "sk-test-key"})
+    @patch("metascaffold.llm_client.LLMClient._call_openai_with_logprobs")
+    async def test_returns_error_on_api_failure(self, mock_call):
+        """complete_with_logprobs() should return error when OpenAI API raises an exception."""
+        mock_call.side_effect = Exception("Connection refused")
+
+        client = LLMClient(codex_path="")
+        result = await client.complete_with_logprobs(
+            model="gpt-4o",
+            system_prompt="test",
+            user_prompt="test",
+        )
+        assert result.content == ""
+        assert "Connection refused" in result.error
